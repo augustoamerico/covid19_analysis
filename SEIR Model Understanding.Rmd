@@ -1,0 +1,402 @@
+---
+title: "SEIR Model Understanding"
+author: "Tiago dos Santos"
+date: "3/13/2020"
+output: 
+  html_document:
+    mathjax: "http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plotly)
+library(htmlwidgets)
+library(lubridate)
+generate_title_subplot <- function(title, plotrow, numberofrows, x = 0.15, yoffset=0.05){
+  return(
+    list(
+      x = x, 
+      y = (numberofrows+1-plotrow)/numberofrows - yoffset, 
+      font = list(size = 16), 
+      text = title, 
+      xref = "paper", 
+      yref = "paper", 
+      xanchor = "center", 
+      yanchor = "bottom", 
+      showarrow = FALSE
+    )
+  )
+}
+
+```
+
+# Simulating some COVID-19 scenarios in Portugal with the SEIR Model
+
+While on reddit, I came across [this paper called "Phase-adjusted estimation of the number of Coronavirus Disease 2019 cases in Wuhan, China"](https://www.nature.com/articles/s41421-020-0148-0), where the authors applied a model to rum some simulations and reason about if the public health interventions indeed suffice or not. 
+
+In the paper, the model used is the SEIR Model - that I had never heard about until today (well, I started this by 9PM on 2020-03-13, and now it is 2AM 2020-03-14)... Until I gave it a try, some googling and youtubing until I understand it.
+
+In this post, I will apply this model with the same parameters as described in the paper to the Portuguese numbers, and check what are the results.
+
+## SEIR Model
+
+In the context Epidemics dynamics, there is a modeling approach called SEIR. 
+
+This techniques describes a process that has 4 stages:
+
+![SEIRS Model](http://idmod.org/docs/malaria/_images/SEIR-SEIRS.png)
+
+- Susceptible Individuals - These are the individuals who have not been infected, but can be exposed to the infection
+- Exposed Individuals - These are the individuals who have acquired the infection, but are still not transmitting the disease 
+- Infectious Individual - These are the individuals who have the pathogen and are active transmitting the disease
+- Resolved Individual - These are the individuals that have either recovered or have died
+
+In this stages, the following interactions can happen:
+
+- [Becoming Exposed] : A Susceptible Individual can become an Exposed Individual
+- [Becoming Infected] : An Exposed Individual can become an Infectious Individual
+- Becoming Resolved: An Infectious Individual will be a Resolved Individual
+
+
+Let's assume that Recovered Individuals become immune to the pathogen, and therefore they cannot be a Susceptible Individual again.
+Indeed, the latter don't even matter because we are going to focus on the number of infected - and for this, the only interactions that matter are [Becoming Exposed] and [Becoming Infected].
+
+### Becoming Exposed
+
+Every day, individuals from a population can become exposed. The only individuals that can become exposed are the susceptible individuals, and there are factors that influence this exposition:
+
+- For a susceptible individual to become exposed, the individual has to have contact with an infectious individual
+- Even when in contact with an infectious individual, there is a given **transmission probability** of the pathogen
+- As the more contacts a susceptible individual has during the day, the greater is the probability for contacting with an infectious individual
+- As the more contacts an infectious individual has during the day, the greater is the probability for contacting with a susceptible individual
+- Has more susceptible individuals became exposed, there are less individuals to become exposed out of the entire population
+
+### Becoming Infected
+
+Every day, there will be exposed individuals that become infectious individuals. This amount of new infectious individuals is a process controlled by the parameter `infectious_rate`, which indicates the rate at which exposed individuals became infectious individuals.
+
+## Implementing a SEIR Model
+
+Here you can see what I was able to implement from the paper's differential equations.
+If you are reading this and the paper, and you have found something that doesn't seems quite right, please get in touch with me!
+
+### Modelling Transmission Rate
+
+In this paper, the `transmission_rate` is modeled with two factors (as also shown in this paper, in the section [R0 IN SIMPLE MODELS](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3935673/):
+
+- $R_0$: this value represent the amount of individuals a given infectious person can infect (an average) by the begin of the epidemic (that0s why it is subscript with 0, representing time = 0)
+- Recovery Rate: To take into consideration the rate of infectious individuals that become recovery individuals
+
+Therefore, we have:
+
+$$
+Transmission Rate = R_0 \times Recovery Rate
+$$
+
+### Simulating the change over time of Susceptible, Exposed, Infectious and Removed Cases
+
+This simulation occurs for a given `amount_of_days`, where the $R_0$ can vary over time (`days_with_new_r0`) - for example, the Portuguese Government decreed for schools to be closed, as well as disco bars, while taking other measures in restaurant and malls, which results in a lower $R_0$ from that point on.
+
+```{r}
+seir_model_huwen <- function(
+  start_date = NULL, # Start date of the simulation
+  amount_of_days=30,
+  days_with_new_r0=list(),
+  initial_susceptible_individuals = 10374822, #https://en.wikipedia.org/wiki/Portuguese_people
+  initial_infectious_individuals = 13,
+  initial_exposed_individuals_factor = 20,
+  initial_removed_individuals = 0,
+  initial_r0 = 2.6,
+  infection_rate = 1/5.2,
+  intensive_care_beds = NULL){
+  
+  #recovery_rate = 1/18
+
+  
+  resolved_rates = list(
+    "mild" = list(
+      "recovery" = list(
+        "percentage" = 0.81*0.99,
+        "rate" = 1/14
+      ),
+      "death" = list(
+        "percentage" = 0.81*0.01,
+        "rate" = 1/35
+      )
+    ),
+    "severe" = list(
+      "recovery" = list(
+        "percentage" = 0.14*0.95,
+        "rate" = 1/35
+      ),
+      "death" = list(
+        "percentage" = 0.14*0.05,
+        "rate" = 1/40
+      )
+    ),
+    "critical" = list(
+      "recovery" = list(
+        "percentage" = 0.05*0.3,
+        "rate" = 1/40
+      ),
+      "death" = list(
+        "percentage" = 0.05*0.7,
+        "rate" = 1/40
+      )
+    )
+  )
+  
+  average_resolved_rate = 0.062735
+  
+  susceptible_individuals = rep(0, amount_of_days)
+  exposed_individuals = rep(0, amount_of_days)
+  infectious_individuals = rep(0, amount_of_days)
+  removed_individuals = rep(0, amount_of_days)
+  recovered_individuals = rep(0, amount_of_days)
+  recovered_individuals[1] = 0
+  dead_individuals = rep(0, amount_of_days)
+  dead_individuals[1] = 0
+  all_population_control = rep(0, amount_of_days)
+  
+  
+  susceptible_individuals[1] = initial_susceptible_individuals 
+  infectious_individuals[1] = initial_infectious_individuals
+  exposed_individuals[1] = infectious_individuals[1]*initial_exposed_individuals_factor
+  
+  all_population_control[1] = 0
+  
+  removed_individuals[1] = initial_removed_individuals
+  
+  current_transmission_rate = initial_r0 * average_resolved_rate
+  
+  all_population = susceptible_individuals[1] + exposed_individuals[1] + infectious_individuals[1] + dead_individuals[1] + recovered_individuals[1]
+  
+  for(step in 1:(amount_of_days-1)){
+    if(step %in% names(days_with_new_r0)){
+      current_transmission_rate = days_with_new_r0[[as.character(step)]]*average_resolved_rate
+    }
+
+
+    new_exposed_individuals = infectious_individuals[step]*current_transmission_rate*(susceptible_individuals[step]/all_population)
+
+    new_infectious_individuals = infection_rate*exposed_individuals[step]
+    new_removed_individuals = average_resolved_rate*infectious_individuals[step]
+
+    susceptible_individuals[step + 1] = susceptible_individuals[step] - new_exposed_individuals
+    exposed_individuals[step + 1] = exposed_individuals[step] + new_exposed_individuals - new_infectious_individuals
+    infectious_individuals[step + 1] = infectious_individuals[step] + new_infectious_individuals - new_removed_individuals#dead_individuals[step] - recovered_individuals[step]
+    
+    #if(step >=14){
+      new_recovered = infectious_individuals[step]*resolved_rates[["mild"]][["recovery"]][["percentage"]]*resolved_rates[["mild"]][["recovery"]][["rate"]] +
+      infectious_individuals[step]*resolved_rates[["severe"]][["recovery"]][["percentage"]]*resolved_rates[["severe"]][["recovery"]][["rate"]] +
+      infectious_individuals[step]*resolved_rates[["critical"]][["recovery"]][["percentage"]]*resolved_rates[["critical"]][["recovery"]][["rate"]]
+      new_deaths = infectious_individuals[step]*resolved_rates[["mild"]][["death"]][["percentage"]]*resolved_rates[["mild"]][["death"]][["rate"]] +
+      infectious_individuals[step]*resolved_rates[["severe"]][["death"]][["percentage"]]*resolved_rates[["severe"]][["death"]][["rate"]] +
+      infectious_individuals[step]*resolved_rates[["critical"]][["death"]][["percentage"]]*resolved_rates[["critical"]][["death"]][["rate"]]
+      new_removed_individuals = average_resolved_rate*infectious_individuals[step]
+    #}else{
+    #  new_recovered = 0
+    #  new_deaths = 0
+    #  new_removed_individuals = 0
+    #}
+    
+    recovered_individuals[step + 1] = new_recovered + recovered_individuals[step]
+    dead_individuals[step + 1] =new_deaths + dead_individuals[step]
+
+    removed_individuals[step + 1] = removed_individuals[step] + new_removed_individuals
+
+    all_population_control[step + 1] = all_population_control[step] + ((dead_individuals[step + 1] - dead_individuals[step]) + (recovered_individuals[step + 1] - recovered_individuals[step]))
+  }
+  
+  is_valid_date = !is.na(lubridate::parse_date_time(start_date,"ymd"))
+  if(!is.null(start_date) && is_valid_date){
+    days = 0:(amount_of_days-1) + as.Date(start_date)
+  }else{
+    days = 1:amount_of_days
+  }
+
+  simulation_data = data.frame(
+    days = days,
+    susceptible_individuals = susceptible_individuals,
+    exposed_individuals = exposed_individuals,
+    infectious_individuals = infectious_individuals,
+    recovered_individuals = recovered_individuals,
+    dead_individuals = dead_individuals,
+    all_population_control = all_population_control,
+    removed_individuals = removed_individuals
+  )
+    
+  if(!is.null(intensive_care_beds)){
+    simulation_data$intensive_care_beds = rep(intensive_care_beds,amount_of_days)
+  }
+  
+  return(simulation_data)
+}
+```
+
+
+## Simulating for 3 isolation measures
+
+Now let's run the simulation for 3 different isolation measures scenarios:
+
+- No isolation measures (this occurred for the first weeks in Portugal, but around 13 March measures started to be taken)
+- Moderate isolation measures: Let's assume that at the beginning no isolation measures were taken. Then by day 20 of the epidemic, after the implementation of isolation measures, the $R_0$ was able to drop to 2. The same thing happened after yet another set of isolation measures, dropping the $R_0$ to 1.5. In day 50 it was able to reach an $R_0$ of 1, and at day 65 the achieved $R_0$ was 0.7.
+- Aggressive isolation measures: Let's assume that at the beginning no isolation measures were taken. Then by day 15, isolation measures were implemented that allowed the $R_0$ to drop to 1.5. Then at day 30, more measures allowed the $R_0$ to drop to 1. The last isolation measures implementation is this case would occur in day 45, dropping the $R_0$ to 0.7.
+
+Let's run the simulation for a total of 4 months, and compare the number of infections over time - while taking into consideration that Portugal has around 500 intensive care beds (and some of those are currently being c by patients with other conditions than COVID-19)
+
+```{r show=F, fig.cap="Three Scenarios: without any isolation (above) VS moderate isolation VS agressive isolation"}
+simulation_with_r0_changes_over_time <- function(
+  total_population, percentage_of_60_years_old_or_more, intensive_care_beds,
+  initial_infectious_individuals, initial_exposed_individuals_factor, r0, amount_of_days, start_date,
+  collection_of_r0_changes_over_time, collection_of_r0_changes_over_time_labels
+  ){
+  
+  simulations = list()
+  
+  for(current_r0_changes_over_time_index in 1:length(collection_of_r0_changes_over_time)){
+    current_r0_changes_over_time = collection_of_r0_changes_over_time[[current_r0_changes_over_time_index]]
+    current_r0_changes_over_time_label = collection_of_r0_changes_over_time_labels[[current_r0_changes_over_time_index]]
+    simulations[[length(simulations) + 1]] = seir_model_huwen(
+      amount_of_days = amount_of_days,
+      start_date = start_date,
+      initial_infectious_individuals = initial_infectious_individuals,
+      initial_susceptible_individuals = total_population, 
+      initial_r0 = r0,
+      intensive_care_beds = intensive_care_beds,
+      days_with_new_r0 = current_r0_changes_over_time
+    )
+  }
+  return(simulations)
+}
+```
+
+
+```{r portuguese-simulation, out.width = "100%"}
+r0_changes_over_time = list(
+  list(),
+  list("20" = 2.7, "35" = 2.5, "50" = 1.7, "65" = 1, "80" = 0.7),
+  list("15" = 2.7, "20" = 1.7, "25" = 1, "30", 0.6)
+)
+r0_changes_over_time_labels = c("Without Isolation Measures","Moderate Isolation Measures", "Agressive Isolation Measures")
+
+portuguese_population = 10283822 
+portuguese_population_older_than_60_percentage = 0.23
+# https://www.pordata.pt/Portugal/Popula%C3%A7%C3%A3o+residente++m%C3%A9dia+anual+total+e+por+grupo+et%C3%A1rio-10
+portuguese_intensive_care_beds_entire_population = portuguese_population*4.2/100000
+# https://link.springer.com/article/10.1007/s00134-012-2627-8 , Fig 1
+portuguese_initial_infectious_individuals = 13
+portuguese_amount_of_days = 30 * 2 # six months
+portuguese_start_date = "2020-03-02"
+r0 = 3.1
+
+portugal_simulation = simulation_with_r0_changes_over_time(
+  total_population =  portuguese_population,
+  percentage_of_60_years_old_or_more = portuguese_population_older_than_60_percentage,
+  intensive_care_beds = portuguese_intensive_care_beds_entire_population,
+  initial_infectious_individuals = portuguese_initial_infectious_individuals,
+  r0 = r0 ,
+  amount_of_days =portuguese_amount_of_days,
+  start_date = portuguese_start_date,
+  collection_of_r0_changes_over_time = r0_changes_over_time,
+  collection_of_r0_changes_over_time_labels = r0_changes_over_time_labels
+)
+
+comparison_simulation_isolation_measures = data.frame(
+  days = portugal_simulation[[1]]$days,
+  infections_without_isolation = portugal_simulation[[1]]$infectious_individuals,
+  infectious_with_moderate_isolation = portugal_simulation[[2]]$infectious_individuals,
+  infectious_with_agressive_isolation = portugal_simulation[[3]]$infectious_individuals,
+  portugal_hospital_beds = portugal_simulation[[1]]$intensive_care_beds
+)
+
+portuguese_simulation_plot <- plotly::subplot(
+  plotly::plot_ly(comparison_simulation_isolation_measures, x = ~days) %>%
+    plotly::add_lines(y = ~infections_without_isolation, name="Infectious\nWithout Isolation", line = list(color = 'black')) %>%
+    plotly::add_lines(y = ~portugal_hospital_beds, name="Intensive Care Beds", line = list(color = 'red'), legendgroup = 'group2'),
+  plotly::plot_ly(comparison_simulation_isolation_measures, x = ~days) %>%
+    plotly::add_lines(y = ~infectious_with_moderate_isolation, name="Infectious\nModerate Isolation", line = list(color = 'rgba(255,150,0,1)')) %>%
+    plotly::add_lines(y = ~infectious_with_moderate_isolation*portuguese_population_older_than_60_percentage, name="Infectious with age >= 60 \nModerate Isolation", line = list(color = 'rgba(255,150,0,0.6)')) %>%
+    plotly::add_lines(y = ~infectious_with_agressive_isolation, name="Infectious\nAggressive Isolation", line = list(color = 'rgba(10, 100, 200, 1)')) %>%
+    plotly::add_lines(y = ~infectious_with_agressive_isolation*portuguese_population_older_than_60_percentage, name="Infectious with age >= 60 \nAggressive Isolation", line = list(color = 'rgba(10, 100, 200, .6)')) %>%
+    plotly::add_lines(y = ~portugal_hospital_beds, name="Intensive Care Beds", line = list(color = 'red'), legendgroup = 'group2'),
+  nrows=2,
+  shareX=T
+)
+
+portuguese_simulation_plot
+```
+
+```{r spanish-simulation}
+
+r0_changes_over_time = list(
+  list(),
+  list("20" = 2, "35" = 1.5, "50" = 1, "65" = 0.7),
+  list("15" = 3.5, "20" = 1, "45" = 0,7)
+)
+r0_changes_over_time_labels = c("Without Isolation Measures","Moderate Isolation Measures", "Agressive Isolation Measures")
+
+spanish_population = 46736776 # https://www.worldometers.info/world-population/spain-population/
+spanish_population_older_than_60_percentage = 0.23
+# https://www.statista.com/statistics/271056/age-distribution-in-spain/
+spanish_intensive_care_beds_entire_population = spanish_population*9.7/100000
+# https://link.springer.com/article/10.1007/s00134-012-2627-8 , Fig 1
+spain_initial_infectious_individuals = 100
+spain_amount_of_days = 30 * 9 # six months
+spain_start_date = "2020-02-26"
+spain_r0 = 4.5
+
+spain_simulation = simulation_with_r0_changes_over_time(
+  total_population =  spanish_population,
+  percentage_of_60_years_old_or_more = spanish_population_older_than_60_percentage,
+  intensive_care_beds = spanish_intensive_care_beds_entire_population,
+  initial_infectious_individuals = spain_initial_infectious_individuals,
+  r0 = spain_r0 ,
+  amount_of_days =spain_amount_of_days,
+  start_date = spain_start_date,
+  collection_of_r0_changes_over_time = r0_changes_over_time,
+  collection_of_r0_changes_over_time_labels = r0_changes_over_time_labels
+)
+
+spain_comparison_simulation_isolation_measures = data.frame(
+  days = spain_simulation[[1]]$days,
+  infections_without_isolation = spain_simulation[[1]]$infectious_individuals,
+  infectious_with_moderate_isolation = spain_simulation[[2]]$infectious_individuals,
+  infectious_with_agressive_isolation = spain_simulation[[3]]$infectious_individuals,
+  hospital_beds = spain_simulation[[1]]$intensive_care_beds
+)
+
+spain_simulation_plot <- plotly::subplot(
+  plotly::plot_ly(spain_comparison_simulation_isolation_measures, x = ~days) %>%
+    plotly::add_lines(y = ~infections_without_isolation, name="Infectious\nWithout Isolation", line = list(color = 'black')) %>%
+    plotly::add_lines(y = ~hospital_beds, name="Intensive Care Beds", line = list(color = 'red'), legendgroup = 'group2'),
+  plotly::plot_ly(spain_comparison_simulation_isolation_measures, x = ~days) %>%
+    plotly::add_lines(y = ~infectious_with_moderate_isolation, name="Infectious\nModerate Isolation", line = list(color = 'rgba(255,150,0,1)')) %>%
+    plotly::add_lines(y = ~infectious_with_moderate_isolation*spanish_population_older_than_60_percentage, name="Infectious with age >= 60 \nModerate Isolation", line = list(color = 'rgba(255,150,0,0.6)')) %>%
+    plotly::add_lines(y = ~infectious_with_agressive_isolation, name="Infectious\nAggressive Isolation", line = list(color = 'rgba(10, 100, 200, 1)')) %>%
+    plotly::add_lines(y = ~infectious_with_agressive_isolation*spanish_population_older_than_60_percentage, name="Infectious with age >= 60 \nAggressive Isolation", line = list(color = 'rgba(10, 100, 200, .6)')) %>%
+    plotly::add_lines(y = ~hospital_beds, name="Intensive Care Beds", line = list(color = 'red'), legendgroup = 'group2'),
+  nrows=2,
+  shareX=T
+)
+
+spain_simulation_plot
+
+```
+
+## Conclusion
+
+We ran three simulations, with the main parameters of the model being obtained from [this paper](https://www.nature.com/articles/s41421-020-0148-0) (which takes into consideration the situation in China).
+
+It is important to understand that these are just simulations taking into consideration those parameters, and the current number of **confirmed** infectious people in Portugal by 2020-03-13. 
+
+The forecast potential of these simulation is, at the best of my knowledge, pretty fuzzy due to the lack of data currently to understand what would be more fitted parameters for Portugal.
+
+Under these conditions, we can see that dropping the $R_0$ by acting now - starting to take isolation measures now - can have a huge difference in the months to come.
+
+Please, let's be considerative these next weeks so that everyone of us can see each other again, and hi-5 people and hug people, as fast as possible.
+
+We are in this together people.
+
+Stay Safe!
