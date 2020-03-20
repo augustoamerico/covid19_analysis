@@ -1,0 +1,16 @@
+---
+title: "Parametrized Simulation"
+output: html_document
+---
+
+```{r}
+resolved_rates = data.frame(
+  Severity = c("Mild", "Severe", "Critical"),
+  Percentage = c(0.81, 0.14, 0.05),
+  RecoveryRate = c(0.99, 0.95, 0.3),
+  DeathRate = c(0.01, 0.05, 0.7)
+)
+
+knitr::kable(resolved_rates)
+```
+

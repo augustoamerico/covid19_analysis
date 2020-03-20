@@ -7,6 +7,11 @@ output:
     mathjax: "http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"
 ---
 
+```{r}
+source("simulation_seir_model.R") #simulation_seir_model function
+```
+
+
 The goal of this document is to estimate the real number of infections in portugal (not the confirmed cases of infection) usign the number of deaths and other parameters, like:
 - Death Rate
 - $R_0$
@@ -29,7 +34,8 @@ To continue the simulation, let's estimate the $R_0$ with the current confirmed 
 
 ## Estimating the $R_0$ with confirmed cases
 
-```{r}
+```{r message=FALSE, warning=FALSE}
+source("simulation_seir_model.R")
 library(incidence)
 library(earlyR)
 
@@ -50,78 +56,49 @@ incidences <- c(incidences, rep("2020-3-14", 57))
 incidences <- c(incidences, rep("2020-3-15", 76))
 incidences <- c(incidences, rep("2020-3-16", 86))
 incidences <- c(incidences, rep("2020-3-17", 117))
+incidences <- c(incidences, rep("2020-3-18", 194))
+incidences <- c(incidences, rep("2020-3-18", 143))
 
 today <- as.Date("2020-03-18")
 incidence_obj <- incidence(as.Date(incidences), last_date = today)
-mu <- 8 # mean days for a person to be infectious and with simptoms 
-sigma <- 3.4 # standard deviation in days
-base_R_stats <- get_R(incidence_obj, si_mean = mu, si_sd = sigma)
+sars_cov_2_si_mu <- 6.5 # mean days for a person to be infectious and with simptoms 
+sars_cov_2_si_sigma <- 4 # standard deviation in days
+base_R_stats <- get_R(incidence_obj, si_mean = sars_cov_2_si_mu, si_sd = sars_cov_2_si_sigma)
 
 plot(base_R_stats)
 ```
 
-```{r}
-R_val <- sample_R(base_R_stats, 1000)
-summary(R_val) # basic stats
-
-hist(R_val, border = "grey", col = "navy",
-     xlab = "Values of R",
-     main = "Sample of likely R values")
-
-plot(base_R_stats, "lambdas", scale = length(incidences) + 1)
-abline(v = incidences, lwd = 3, col = "grey")
-abline(v = today, col = "blue", lty = 2, lwd = 2)
-points(incidences, seq_along(incidences), pch = 20, cex = 3)
-
-pt_incidence_fit <- incidence::fit(incidence_obj, split = NULL)
-plotly::ggplotly(plot(pt_incidence_fit))
-
-```
-
-
-
 So, assuming a $R_0$ of 3.1 and a factor of 20 of exposing individuals (meaning that the inicial 20 infected individuals generated 400 exposed individuals at time 0), let's do a simulation using the SEIR Model
 
 
-```{r}
+```{r out.width="100%"}
+library(plotly)
 
-r0_changes_over_time = list(
-  #list()
-  #list("15" = 5.1, "20" = 4.5, "25" = 3, "40" = 0.7)
-  list("20" = 2.1, "25" = 1.5, "35" = 1., "45" = 0.7)
-)
-r0_changes_over_time_labels = c("Moderate Isolation Measures")
+changes_over_time = list("20" = 1.5, "25" = 1.2, "30" = 1., "35" = 0.7)
+changes_over_time_labels = c("Moderate Isolation Measures")
 
-portuguese_population = 10283822 
-portuguese_population_older_than_60_percentage = 0.23
-# https://www.pordata.pt/Portugal/Popula%C3%A7%C3%A3o+residente++m%C3%A9dia+anual+total+e+por+grupo+et%C3%A1rio-10
-portuguese_intensive_care_beds_entire_population = portuguese_population*4.2/100000
-# https://link.springer.com/article/10.1007/s00134-012-2627-8 , Fig 1
-portuguese_initial_infectious_individuals = 20
-portuguese_amount_of_days = 30 * 2 # six months
-portuguese_start_date = "2020-02-28"
-r0 = 2.8
-  
+number_of_deaths = 2
 
-portugal_simulation = simulation_with_r0_changes_over_time(
-  total_population = portuguese_population,
-  intensive_care_beds = portuguese_intensive_care_beds_entire_population,
-  initial_infectious_individuals = portuguese_initial_infectious_individuals,
-  initial_exposed_individuals_factor = 20,
-  r0 = r0 ,
-  amount_of_days = portuguese_amount_of_days,
-  start_date = portuguese_start_date,
-  collection_of_r0_changes_over_time = r0_changes_over_time,
-  collection_of_r0_changes_over_time_labels = r0_changes_over_time_labels
+initial_infectious_individuals = 95/5*number_of_deaths
+
+sim_data = simulation_seir_model(
+  initial_susceptible_individuals = 10283822, #Portuguese Population, https://www.pordata.pt/Portugal/Popula%C3%A7%C3%A3o+residente++m%C3%A9dia+anual+total+e+por+grupo+et%C3%A1rio-10
+  initial_infectious_individuals = initial_infectious_individuals,
+  initial_exposed_individuals = 20*initial_infectious_individuals,
+  initial_recovered_individuals = 0,
+  initial_death_individuals = 0,
+  start_date = "2020-03-01",
+  amount_of_days = 30*4,
+  initial_r0 = base_R_stats$R_ml,
+  infection_rate = 1/sars_cov_2_si_mu,
+  days_with_new_r0 = changes_over_time
 )
 
-seir_model_with_deaths_generated_data = portugal_simulation[[1]]
-
-plotly::plot_ly(seir_model_with_deaths_generated_data, x = ~days) %>%
-  plotly::add_lines(y = ~susceptible_individuals, name = "Susceptible", line = list(color = "black")) %>%
+plotly::plot_ly(sim_data, x = ~days) %>%
+  plotly::add_lines(y = ~(infectious_individuals + recovered_individuals + dead_individuals)*0.75, name = "Confirmed Accumulated", line = list(color = "gray")) %>%
+  plotly::add_lines(y = ~infectious_individuals + recovered_individuals + dead_individuals, name = "Infected Accumulated", line = list(color = "black")) %>%
   plotly::add_lines(y = ~exposed_individuals, name = "Exposed", line = list(color = "blue")) %>%
   plotly::add_lines(y = ~infectious_individuals, name="Infectious",line = list(color = "orange")) %>%
-  plotly::add_lines(y = ~recovered_individuals, name="Recovered",line = list(color = "green")) %>%
-  plotly::add_lines(y = ~dead_individuals, name="Death",line = list(color = "red"))  
-  #plotly::layout(yaxis = list(type = "log"))
+  plotly::add_lines(y = ~recovered_individuals, name="Recovered Accumulated",line = list(color = "green")) %>%
+  plotly::add_lines(y = ~dead_individuals, name="Death Accumulated",line = list(color = "red"))  
 ```
